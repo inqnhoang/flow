@@ -9,6 +9,7 @@
 #include <queue>
 #include <fstream>
 #include <iostream>
+#include <unordered_set>
 
 class FlowSolver {
     using pos_t = uint8_t;
@@ -53,6 +54,43 @@ class FlowSolver {
         size_t capacity;
         size_t count; 
     };
+
+    struct state_key {
+        std::array<uint8_t, MAX_CELLS> board;
+        uint16_t completed;
+        uint8_t last_color;
+
+        bool operator== (const state_key& a) const {
+            return completed == a.completed &&
+                last_color == a.last_color &&
+                board == a.board;
+        }
+    };
+
+    struct state_key_hash {
+        size_t operator()(state_key const& s) const {
+            size_t h = 0;
+
+            for (uint8_t cell : s.board) {
+                h = h * 131 + cell;
+            }
+
+            h = h * 31 + s.completed;
+            h = h * 31 + s.last_color;
+
+            return h;
+        }
+    };
+
+    state_key make_key(const game_state_t* state) {
+        state_key k;
+        for (size_t i = 0; i < MAX_CELLS; i++) {
+            k.board[i] = state->cells[i];
+        }
+        k.completed = state->completed;
+        k.last_color = state->last_color;
+        return k;
+    }
 
     struct node_compare {
         bool operator()(const tree_node_t* a, const tree_node_t* b) const {
@@ -225,6 +263,7 @@ public:
             state->cells[new_pos] = create_cell(GOAL, color, dir);
             state->completed |= 1 << color;
             --state->colors_unsolved;
+            state->last_color = color;
             return 0;
         }
 
@@ -439,6 +478,9 @@ public:
                     }
                 }
             }
+        }
+        if (state->num_free == 0 && state->colors_unsolved != 0) {
+            return true; // DO NOT expand
         }
 
         return num_free <= 1;
@@ -708,32 +750,32 @@ public:
         game_state_t* node_state = &node->game_state;
         int color, dir;
 
-        // if (find_forced_move(node_state, &color, &dir)) {
-        //     if (!game_can_move(node_state, color, dir)) {
-        //         assert(node == storage->start + storage->count - 1);
-        //         node_storage_unalloc(storage, node);
-        //         return nullptr;
-        //     }
-        //     printf("\nforced\n");
+        if (find_forced_move(node_state, &color, &dir)) {
+            if (!game_can_move(node_state, color, dir)) {
+                assert(node == storage->start + storage->count - 1);
+                node_storage_unalloc(storage, node);
+                return nullptr;
+            }
+            printf("\nforced\n");
 
-        //     tree_node_t* forced_child = create_node(node_state, storage, node);
+            tree_node_t* forced_child = create_node(node_state, storage, node);
 
-        //     if (forced_child) {
+            if (forced_child) {
 
-        //         game_make_move(&forced_child->game_state, color, dir, 1);
+                game_make_move(&forced_child->game_state, color, dir, 1);
 
-        //         node_update_costs(forced_child, 0);
-        //         forced_child = validate_state(forced_child, storage);
+                node_update_costs(forced_child, 0);
+                forced_child = validate_state(forced_child, storage);
             
-        //         if (!forced_child) {
-        //             assert(node == storage->start + storage->count - 1);
-        //             node_storage_unalloc(storage, node);
-        //             return nullptr;
-        //         } else {
-        //             return forced_child;
-        //         }
-        //     }
-        // }
+                if (!forced_child) {
+                    assert(node == storage->start + storage->count - 1);
+                    node_storage_unalloc(storage, node);
+                    return nullptr;
+                } else {
+                    return forced_child;
+                }
+            }
+        }
 
         if (game_check_deadends(node_state)) {
             assert(node == storage->start + storage->count - 1);
@@ -745,13 +787,13 @@ public:
         uint8_t rmap[MAX_CELLS];
         size_t rcount = build_regions(node_state, rmap);
         
-        // if (game_regions_stranded(node_state, rcount, rmap, MAX_COLORS, 1)) {
-        //     print_board(node_state);
-        //     assert(node == storage->start + storage->count - 1);
-        //     node_storage_unalloc(storage, node);
-        //     printf("\nstranded\n");
-        //     return nullptr;
-        // }
+        if (game_regions_stranded(node_state, rcount, rmap, MAX_COLORS, 1)) {
+            print_board(node_state);
+            assert(node == storage->start + storage->count - 1);
+            node_storage_unalloc(storage, node);
+            printf("\nstranded\n");
+            return nullptr;
+        }
 
         // if (check_bottleneck(node_state)) {
         //     assert(node == storage->start + storage->count - 1);
@@ -765,7 +807,7 @@ public:
 
     // ===== SEARCH =====
 
-    game_state_t* game_search (size_t max_nodes = 100000) {
+    game_state_t* game_search (size_t max_nodes = 1000000) {
         game_state_t init_state;
         // print_board(&init_state);
         memset(&init_state, 0, sizeof(game_state_t));
@@ -793,7 +835,9 @@ public:
         }
         
         node_update_costs(root, 0);
-        
+        int min_free = 10000000;
+        game_state_t* min_state = (game_state_t*)malloc(sizeof(game_state_t));
+
         std::priority_queue<tree_node_t*, std::vector<tree_node_t*>, node_compare> pq;
         
         root = validate_state(root, &storage);
@@ -807,6 +851,7 @@ public:
         // print_board(&root->game_state);
         pq.push(root);
 
+        std::unordered_set<state_key, state_key_hash> visited;
         while (!pq.empty()) {
             tree_node_t* node = pq.top();
             pq.pop();
@@ -814,13 +859,18 @@ public:
         
             
             game_state_t* state = &node->game_state;
+            if (state->num_free < min_free) {
+                min_free = state->num_free;
+                memcpy(min_state, state, sizeof(game_state_t));
+            }
+
             printf("BOARD JUST POPPED\n");
             print_board(state);
             
             int color = next_color_to_move(state);
             printf("next_color_to_move: last_color=%d, completed=0x%x numfree=%d\n", 
                 state->last_color, state->completed, state->num_free);
-            if (color < 0) {printf("color less than 0\n"); printf("%d\n", state->colors_unsolved);continue;}
+            if (color < 0) {printf("color less than 0\n"); printf("%d\n", state->colors_unsolved); continue;}
             
             for (int dir = 0; dir < 4; dir++) {
                 if (!game_can_move(state, color, dir)) { printf("cannot make move %d\n", dir); print_board(state); continue; }
@@ -848,8 +898,15 @@ public:
                         memcpy(solution, child_state, sizeof(game_state_t));
                         break;  
                     }
-                    pq.push(child);
-                    printf("added to queue\n");
+
+                    state_key key = make_key(&child->game_state);
+                    if (visited.find(key) == visited.end()) {
+                        visited.insert(key);
+                        pq.push(child);
+                        printf("added to queue\n");
+                    } else {
+                        // free(child);
+                    }
                 }
 
             }
@@ -857,6 +914,12 @@ public:
             if (solution) break;
         }
 
+        if (min_state) {
+            print_board(min_state);
+            printf("min_num_free: %d", min_free);
+        }
+
+        free(min_state);
         node_storage_destroy(&storage);
         return solution;
     }
@@ -1030,7 +1093,7 @@ public:
 int main() {
     FlowSolver solver;
     
-    if (solver.read_from_file("puzzles/easy_3x3.txt")) {
+    if (solver.read_from_file("puzzles/jumbo_10x10_01.txt")) {
         solver.game_search();
         if (solver.solution) {
             std::cout << "Solution found!" << std::endl;
