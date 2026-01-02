@@ -25,6 +25,7 @@ class FlowSolver {
         uint8_t  num_free;
         int8_t   last_color;
         uint16_t completed;
+        uint8_t colors_unsolved;
 
         game_state_t(): cells{0}, pos{0}, num_free{0}, last_color{-1}, completed{0} {};
     };
@@ -182,9 +183,11 @@ public:
         pos_t new_pos = offset_pos(cur_x, cur_y, dir);
 
         if (!pos_valid(new_pos)) return 0;
-        if (new_pos == goal_pos[color]) return 1;
+        if (new_pos == goal_pos[color] && state->colors_unsolved > 1) return 1;
+        else if (state->colors_unsolved == 1 && state->num_free == 0) return 1;
 
         if (state->cells[new_pos]) {
+            printf("occupado brocacho\n");
             return 0;
         }
 
@@ -194,7 +197,8 @@ public:
         for (int i = 0; i < 4; i++) {
             pos_t neighbor = offset_pos(new_x, new_y, i);
             if (neighbor == INVALID_POS || neighbor >= MAX_CELLS) continue;
-            if (neighbor != INVALID_POS && 
+
+            if (neighbor == INVALID_POS && 
                 state->cells[neighbor] && 
                 neighbor != state->pos[color] && 
                 neighbor != goal_pos[color] && 
@@ -220,10 +224,11 @@ public:
         if (new_pos == goal_pos[color]) {
             state->cells[new_pos] = create_cell(GOAL, color, dir);
             state->completed |= 1 << color;
+            --state->colors_unsolved;
             return 0;
         }
 
-        assert(state->cells[new_pos] == 0);
+        if (state->cells[new_pos] != 0) return 2;
         state->cells[new_pos] = move;
         state->pos[color] = new_pos;
         state->last_color = color;
@@ -243,9 +248,12 @@ public:
         }
 
         if (goal_dir >= 0) {
-            state->cells[goal_pos[color]] = create_cell(GOAL, color, goal_dir);
-            state->completed |= (1 << color);
-            action_cost = 0;
+            if (state->colors_unsolved > 1) {
+                state->cells[goal_pos[color]] = create_cell(GOAL, color, goal_dir);
+                state->completed |= (1 << color);
+                action_cost = 0;
+                --state->colors_unsolved;
+            }
         } else {
             int free = coord_free_space(state, new_x, new_y);
             if (free == 1) action_cost = 2;
@@ -267,6 +275,7 @@ public:
                 return color;
             }
         }
+
         return -1;
     }
 
@@ -770,6 +779,7 @@ public:
         
         init_state.num_free = size * size - 2 * num_colors;
         init_state.last_color = -1;
+        init_state.colors_unsolved = num_colors;
 
         // print_board(&init_state);
         
@@ -808,9 +818,9 @@ public:
             print_board(state);
             
             int color = next_color_to_move(state);
-            printf("next_color_to_move: last_color=%d, completed=0x%x\n", 
-                state->last_color, state->completed);
-            if (color < 0) {printf("color less than 0\n"); continue;}
+            printf("next_color_to_move: last_color=%d, completed=0x%x numfree=%d\n", 
+                state->last_color, state->completed, state->num_free);
+            if (color < 0) {printf("color less than 0\n"); printf("%d\n", state->colors_unsolved);continue;}
             
             for (int dir = 0; dir < 4; dir++) {
                 if (!game_can_move(state, color, dir)) { printf("cannot make move %d\n", dir); print_board(state); continue; }
